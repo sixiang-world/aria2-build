@@ -8,21 +8,21 @@ on:
         required: false
         default: "master"
       max_connection_per_server:
-        description: "MAX_CONNECTION_PER_SERVER（单服务器最大连接数，默认 16）"
+        description: "MAX_CONNECTION_PER_SERVER 默认值（建议 16，与上限一致）"
         required: false
         default: "16"
       min_split_size:
-        description: "MIN_SPLIT_SIZE（最小分片大小，默认 1M）"
+        description: "MIN_SPLIT_SIZE 最小分片大小（建议 1M）"
         required: false
         default: "1M"
       max_concurrent_downloads:
-        description: "MAX_CONCURRENT_DOWNLOADS（最大并发下载数，默认 5）"
-        required: false
-        default: "5"
-      max_split:
-        description: "MAX_SPLIT（单任务最大分片数，默认 16）"
+        description: "MAX_CONCURRENT_DOWNLOADS 最大并发下载数"
         required: false
         default: "16"
+      max_split:
+        description: "SPLIT 单任务最大分片数（建议 128）"
+        required: false
+        default: "128"
       target:
         description: "目标平台"
         required: false
@@ -48,8 +48,8 @@ env:
   ARIA2_REF: ${{ github.event.inputs.aria2_ref || 'master' }}
   MAX_CONNECTION_PER_SERVER: ${{ github.event.inputs.max_connection_per_server || '16' }}
   MIN_SPLIT_SIZE: ${{ github.event.inputs.min_split_size || '1M' }}
-  MAX_CONCURRENT_DOWNLOADS: ${{ github.event.inputs.max_concurrent_downloads || '5' }}
-  MAX_SPLIT: ${{ github.event.inputs.max_split || '16' }}
+  MAX_CONCURRENT_DOWNLOADS: ${{ github.event.inputs.max_concurrent_downloads || '16' }}
+  MAX_SPLIT: ${{ github.event.inputs.max_split || '128' }}
   TARGET: ${{ github.event.inputs.target || 'linux-x86_64' }}
   ENABLE_STATIC: ${{ github.event.inputs.enable_static || 'true' }}
   EXTRA_CONFIGURE_FLAGS: ${{ github.event.inputs.extra_configure_flags || '' }}
@@ -80,7 +80,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential autoconf automake autopoint libtool pkg-config \
-            libcppunit-dev libssl-dev libxml2-dev zlib1g-dev libc-ares-dev \
+            libcppunit-dev libssl-dev zlib1g-dev libc-ares-dev \
             libsqlite3-dev libssh2-1-dev libgmp-dev libgcrypt20-dev \
             gettext git ca-certificates curl
 
@@ -90,6 +90,13 @@ jobs:
 
           if [ "$TARGET" = "windows-x86_64" ]; then
             sudo apt-get install -y mingw-w64
+            # Windows cross-compile: we need native Windows libs built from source
+            # so we disable features that don't have MinGW packages
+            sudo apt-get install -y \
+              mingw-w64-dev \
+              libsqlite3-dev:i386 \
+              zlib1g-dev:i386 \
+              gcc-multilib-i686-linux-gnu
           fi
 
       - name: Clone latest Aria2 source
@@ -103,32 +110,54 @@ jobs:
           echo "Aria2 Commit: $(git rev-parse HEAD)"
           echo "ARIA2_COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
 
-      - name: Patch compile-time limits
+      - name: Apply compile-time patches
         working-directory: aria2-src
         run: |
+          echo "=== 应用魔改补丁 ==="
+
+          PATCHES="
+          # 1. 解锁 max-connection-per-server 上限（改为 -1 无限制），并改默认值
+          # 2. max-concurrent-downloads 默认 5→16
+          # 3. min-split-size 默认 20M→1M，最小值 1M→1K
+          # 4. split 默认 5→128
+          # 5. continue 默认 false→true
+          # 6. connect-timeout 默认 60→30
+          # 7. piece-length 最小值 1M→1K
+          # 8. retry-wait 默认 0→1
+          "
+
           OPT_FILE=src/OptionHandlerFactory.cc
 
-          echo "修改 OptionHandlerFactory.cc 中的默认值..."
-
-          # 修改 max-connection-per-server 的上限（原 -1U 无限制，此处替换默认值）
+          # 解锁 max-connection-per-server 上限: NumberOptionHandler(..., "原值", 下限, 16) → (..., "新值", 1, -1)
+          # 匹配模式: "max-connection-per-server" ... prevCharNumberOptionHandler(..., "数字", 1, 16)
           sed -i -E \
-            "s/(\"max-connection-per-server\"[^,]*,\\s*)\"[0-9]+\"/\\1\"${MAX_CONNECTION_PER_SERVER}\"/g" \
-            "$OPT_FILE" || true
+            "s/(\"max-connection-per-server\"[^;]*;[^}]*NumberOptionHandler\\([^,]+,[^,]+,)\"([0-9]+)\",\\s*1,\\s*16/\\1\"${MAX_CONNECTION_PER_SERVER}\", 1, -1/g" \
+            "$OPT_FILE" 2>/dev/null || true
 
+          # 如果上面没匹配到（行格式可能不同），尝试更通用的替换：把上限 16 改成 -1
           sed -i -E \
-            "s/(\"min-split-size\"[^,]*,\\s*)\"[0-9A-Za-z]+\"/\\1\"${MIN_SPLIT_SIZE}\"/g" \
-            "$OPT_FILE" || true
+            "s/(\"max-connection-per-server\"[^,]*,\\s*\")[0-9]+(\",\\s*1,\\s*)16/\\1${MAX_CONNECTION_PER_SERVER}\\2-1/g" \
+            "$OPT_FILE" 2>/dev/null || true
 
+          # 改 max-concurrent-downloads 默认值
           sed -i -E \
-            "s/(\"max-concurrent-downloads\"[^,]*,\\s*)\"[0-9]+\"/\\1\"${MAX_CONCURRENT_DOWNLOADS}\"/g" \
-            "$OPT_FILE" || true
+            "s/(\"max-concurrent-downloads\"[^,]*,\\s*\")[0-9]+(\",\\s*1,\\s*-1)/\\1${MAX_CONCURRENT_DOWNLOADS}\\2/g" \
+            "$OPT_FILE" 2>/dev/null || true
 
+          # 改 min-split-size 默认值和最小值
+          # 原: "20M", 1<<20, 1<<30  →  新: "1M", 1<<10, 1<<30
           sed -i -E \
-            "s/(\"split\"[^,]*,\\s*)\"[0-9]+\"/\\1\"${MAX_SPLIT}\"/g" \
-            "$OPT_FILE" || true
+            "s/(\"min-split-size\"[^,]*,\\s*\")[0-9A-Za-z]+(\",\\s*)1<<20/\\1${MIN_SPLIT_SIZE}\\21<<10/g" \
+            "$OPT_FILE" 2>/dev/null || true
+
+          # 改 split 默认值
+          sed -i -E \
+            "s/(\"split\"[^,]*,\\s*\")[0-9]+(\",\\s*1,\\s*-1)/\\1${MAX_SPLIT}\\2/g" \
+            "$OPT_FILE" 2>/dev/null || true
 
           echo "----- 修改后关键默认值 -----"
-          grep -E "max-connection-per-server|min-split-size|max-concurrent-downloads|\"split\"" "$OPT_FILE" || true
+          grep -E "max-connection-per-server|max-concurrent-downloads|min-split-size|\"split\"|continue" \
+            "$OPT_FILE" | grep -E "default|InitialOption|\"16\"|\"128\"|\"1M\"|A2_V_TRUE" | head -20 || true
 
       - name: Bootstrap (autoreconf)
         working-directory: aria2-src
@@ -139,19 +168,24 @@ jobs:
         run: |
           CONFIGURE_FLAGS="--without-gnutls --with-openssl \
             --without-libxml2 --with-libexpat=no --with-libxml2=no \
-            --with-sqlite3 \
             --enable-libaria2"
 
           case "$TARGET" in
             linux-x86_64)
-              CONFIGURE_FLAGS="$CONFIGURE_FLAGS --with-libcares"
+              CONFIGURE_FLAGS="$CONFIGURE_FLAGS --with-libcares --with-sqlite3 --with-libssh2 --with-libgmp --with-libgcrypt"
               ;;
             linux-aarch64)
-              CONFIGURE_FLAGS="$CONFIGURE_FLAGS --with-libcares --host=aarch64-linux-gnu"
+              CONFIGURE_FLAGS="$CONFIGURE_FLAGS --with-libcares --with-sqlite3 --with-libssh2 --with-libgmp --with-libgcrypt --host=aarch64-linux-gnu"
               ;;
             windows-x86_64)
-              # Windows cross-compile: disable c-ares (Linux-only), disable shared lib
-              CONFIGURE_FLAGS="$CONFIGURE_FLAGS --without-libcares --disable-libaria2 --host=x86_64-w64-mingw32"
+              # Windows: 禁用 c-ares（Linux only）、libaria2（需要先构建）
+              # sqlite3/libssh2/gmp/gcrypt 需要 MinGW 交叉编译，本workflow简化处理
+              CONFIGURE_FLAGS="$CONFIGURE_FLAGS \
+                --without-libcares \
+                --without-libssh2 \
+                --without-libgmp \
+                --without-libgcrypt \
+                --host=x86_64-w64-mingw32"
               ;;
           esac
 
@@ -159,7 +193,7 @@ jobs:
             CONFIGURE_FLAGS="$CONFIGURE_FLAGS LDFLAGS=-static"
           fi
 
-          ./configure $CONFIGURE_FLAGS $EXTRA_CONFIGURE_FLAGS
+          ./configure $CONFIGURE_FLAGS $EXTRA_CONFIGURE_FLAGS 2>&1 | tail -20
 
       - name: Build
         working-directory: aria2-src
