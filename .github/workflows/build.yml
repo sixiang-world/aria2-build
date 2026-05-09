@@ -90,13 +90,6 @@ jobs:
 
           if [ "$TARGET" = "windows-x86_64" ]; then
             sudo apt-get install -y mingw-w64
-            # Windows cross-compile: we need native Windows libs built from source
-            # so we disable features that don't have MinGW packages
-            sudo apt-get install -y \
-              mingw-w64-dev \
-              libsqlite3-dev:i386 \
-              zlib1g-dev:i386 \
-              gcc-multilib-i686-linux-gnu
           fi
 
       - name: Clone latest Aria2 source
@@ -178,13 +171,14 @@ jobs:
               CONFIGURE_FLAGS="$CONFIGURE_FLAGS --with-libcares --with-sqlite3 --with-libssh2 --with-libgmp --with-libgcrypt --host=aarch64-linux-gnu"
               ;;
             windows-x86_64)
-              # Windows: 禁用 c-ares（Linux only）、libaria2（需要先构建）
-              # sqlite3/libssh2/gmp/gcrypt 需要 MinGW 交叉编译，本workflow简化处理
+              # Windows: 禁用所有需要交叉编译依赖库的特性
+              # c-ares(Linux only)、sqlite3/libssh2/gmp/gcrypt(需MinGW交叉编译)
               CONFIGURE_FLAGS="$CONFIGURE_FLAGS \
                 --without-libcares \
                 --without-libssh2 \
                 --without-libgmp \
                 --without-libgcrypt \
+                --without-sqlite3 \
                 --host=x86_64-w64-mingw32"
               ;;
           esac
