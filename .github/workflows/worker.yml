@@ -258,8 +258,9 @@ jobs:
           CC=x86_64-w64-mingw32-gcc \
           AR=x86_64-w64-mingw32-ar \
           RANLIB=x86_64-w64-mingw32-ranlib \
-          CROSS_COMPILE=x86_64-w64-mingw32- \
-            ./Configure --prefix="$PREFIX_DIR" mingw64
+          RC=x86_64-w64-mingw32-windres \
+            ./Configure --cross-compile-prefix=x86_64-w64-mingw32- \
+            --prefix="$PREFIX_DIR" mingw64
           make -j"$(nproc)"
           make install_sw
           echo "- OpenSSL: 3.3.2" >> "$BUILD_INFO"
