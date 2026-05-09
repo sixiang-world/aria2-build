@@ -253,8 +253,7 @@ jobs:
           mkdir -p /tmp/openssl-win
           tar -xzf "$DOWNLOADS_DIR/openssl.tar.gz" --strip-components=1 -C /tmp/openssl-win
           cd /tmp/openssl-win
-          ./Configure --cross-compile-prefix=x86_64-w64-mingw32- \
-            --prefix="$PREFIX_DIR" mingw64 static
+          CC=x86_64-w64-mingw32-gcc ./Configure --prefix="$PREFIX_DIR" mingw64
           make -j"$(nproc)"
           make install_sw
           echo "- OpenSSL: 3.3.2" >> "$BUILD_INFO"
