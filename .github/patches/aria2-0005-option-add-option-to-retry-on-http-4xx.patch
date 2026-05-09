@@ -1,0 +1,149 @@
+From aecaee8949470bddb3f0728da7c531e9339950b3 Mon Sep 17 00:00:00 2001
+From: myfreeer
+Date: Sun, 22 Jul 2018 20:25:44 +0800
+Subject: [PATCH] option: add option to retry on http 4xx
+
+---
+ src/HttpSkipResponseCommand.cc     | 36 +++++++++++++++++++++++++
+ src/OptionHandlerFactory.cc        | 40 ++++++++++++++++++++++++++-
+ src/prefs.cc                       |  8 +++++
+ src/prefs.h                        |  8 +++++
+ src/usage_text.h                   | 16 +++++++++++
+ 5 files changed, 107 insertions(+), 6 deletions(-)
+
+diff --git a/src/HttpSkipResponseCommand.cc b/src/HttpSkipResponseCommand.cc
+index 5f69a2d..3d80c6e 100644
+--- a/src/HttpSkipResponseCommand.cc
++++ b/src/HttpSkipResponseCommand.cc
+@@ -215,6 +215,42 @@ void HttpSkipResponseCommand::processHandler() {
+ break;
++ case 400:
++ if (getOption()->getAsBool(PREF_RETRY_ON_400)
++ && getOption()->getAsInt(PREF_RETRY_WAIT) > 0) {
++ throw DL_RETRY_EX2(fmt(EX_BAD_STATUS, statusCode),
++ error_code::HTTP_PROTOCOL_ERROR);
++ }
++ break;
++ case 403:
++ if (getOption()->getAsBool(PREF_RETRY_ON_403)
++ && getOption()->getAsInt(PREF_RETRY_WAIT) > 0) {
++ throw DL_RETRY_EX2(fmt(EX_FORBIDDEN, statusCode),
++ error_code::HTTP_PROTOCOL_ERROR);
++ }
++ break;
++ case 406:
++ if (getOption()->getAsBool(PREF_RETRY_ON_406)
++ && getOption()->getAsInt(PREF_RETRY_WAIT) > 0) {
++ throw DL_RETRY_EX2(fmt(EX_NOT_ACCEPTABLE, statusCode),
++ error_code::HTTP_PROTOCOL_ERROR);
++ }
++ break;
++ case 407:
++ throw DL_RETRY_EX2(fmt(EX_PROXY_AUTH_REQUIRED, statusCode),
++ error_code::HTTP_PROTOCOL_ERROR);
++ break;
++ default:
++ if (statusCode >= 400 && getOption()->getAsBool(PREF_RETRY_ON_UNKNOWN)
++ && getOption()->getAsInt(PREF_RETRY_WAIT) > 0) {
++ throw DL_RETRY_EX2(fmt(EX_HTTP_STATUS, statusCode),
++ error_code::HTTP_PROTOCOL_ERROR);
++ }
++ break;
+ }
+ // Normally, we send a signal to the standalone process to stop,
+diff --git a/src/OptionHandlerFactory.cc b/src/OptionHandlerFactory.cc
+index 5768f7b..40f6fcf 100644
+--- a/src/OptionHandlerFactory.cc
++++ b/src/OptionHandlerFactory.cc
+@@ -1012,7 +1012,45 @@ std::vector OptionHandlerFactory::createOptionHandlers()
+ op->setInitialOption(true);
+ handlers.push_back(op);
+ }
++ {
++ OptionHandler* op(new BooleanOptionHandler(
++ PREF_RETRY_ON_400, TEXT_RETRY_ON_400, A2_V_FALSE));
++ op->addTag(TAG_ADVANCED);
++ op->addTag(TAG_HTTP);
++ handlers.push_back(op);
++ }
++ {
++ OptionHandler* op(new BooleanOptionHandler(
++ PREF_RETRY_ON_403, TEXT_RETRY_ON_403, A2_V_FALSE));
++ op->addTag(TAG_ADVANCED);
++ op->addTag(TAG_HTTP);
++ handlers.push_back(op);
++ }
++ {
++ OptionHandler* op(new BooleanOptionHandler(
++ PREF_RETRY_ON_406, TEXT_RETRY_ON_406, A2_V_FALSE));
++ op->addTag(TAG_ADVANCED);
++ op->addTag(TAG_HTTP);
++ handlers.push_back(op);
++ }
++ {
++ OptionHandler* op(new BooleanOptionHandler(
++ PREF_RETRY_ON_UNKNOWN, TEXT_RETRY_ON_UNKNOWN, A2_V_FALSE));
++ op->addTag(TAG_ADVANCED);
++ op->addTag(TAG_HTTP);
++ handlers.push_back(op);
++ }
+ #ifdef ENABLE_MESSAGE_DIGEST
+ {
+ OptionHandler* op(new BooleanOptionHandler(
+diff --git a/src/prefs.cc b/src/prefs.cc
+index d35a6b9..f9b8e44 100644
+--- a/src/prefs.cc
++++ b/src/prefs.cc
+@@ -137,6 +137,10 @@ const StringPair prefs[] = {
+   {PREF_RPC_SECRET, "rpc-secret"},
+   {PREF_RPC_LDAP_PASSWORD, "rpc-ldap-password"},
+   {PREF_RPC_LDAP_USER_FILTER, "rpc-ldap-user-filter"},
++  {PREF_RETRY_ON_400, "retry-on-400"},
++  {PREF_RETRY_ON_403, "retry-on-403"},
++  {PREF_RETRY_ON_406, "retry-on-406"},
++  {PREF_RETRY_ON_UNKNOWN, "retry-on-unknown"},
+   //{"PREF_SHOW_PROGRESS, "show-progress"},
+   {PREF_SPLIT, "split"},
+   {PREF_STREAM_PIECE_LENGTH, "stream-piece-length"},
+diff --git a/src/prefs.h b/src/prefs.h
+index 4e01f7c..d4c0d89 100644
+--- a/src/prefs.h
++++ b/src/prefs.h
+@@ -124,6 +124,10 @@ enum PREF {
+   PREF_RPC_LDAP_USER_FILTER,
+   PREF_SAVE_CONTROL_FILE,
++  PREF_RETRY_ON_400,
++  PREF_RETRY_ON_403,
++  PREF_RETRY_ON_406,
++  PREF_RETRY_ON_UNKNOWN,
+   PREF_SHOW_PROGRESS,
+   PREF_SPLIT,
+   PREF_STREAM_PIECE_LENGTH,
+diff --git a/src/usage_text.h b/src/usage_text.h
+--- a/src/usage_text.h
++++ b/src/usage_text.h
+@@ -219,6 +219,14 @@ namespace aria2 {
+   "See also --show-console-readout.\n"
+   "\n"
+   "\n"
++  TEXT_RETRY_ON_400,
++  "\n --retry-on-400[=true|false]\n"
++  "\n"
++  "\n"
++  TEXT_RETRY_ON_403,
++  "\n --retry-on-403[=true|false]\n"
++  "\n"
++  "\n"
++  TEXT_RETRY_ON_406,
++  "\n --retry-on-406[=true|false]\n"
++  "\n"
++  "\n"
++  TEXT_RETRY_ON_UNKNOWN,
++  "\n --retry-on-unknown[=true|false]\n"
++  "\n"
++  "\n"
+   TEXT_RETRY_WAIT,
+   "\n --retry-wait=SEC\n"
+   "\n"
+--
+2.18.0

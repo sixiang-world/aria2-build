@@ -1,0 +1,350 @@
+name: Build Aria2 (Worker)
+
+# 基于 DoTheBetter/aria2_build 的完整编译方案
+# 支持 Linux musl 静态编译 + Windows MinGW 交叉编译
+# 集成 6 个魔改补丁
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "目标平台"
+        required: true
+        type: choice
+        options:
+          - linux-x86_64-musl
+          - linux-aarch64-musl
+          - windows-x86_64
+      aria2_ref:
+        description: "Aria2 源码分支 / Tag / Commit"
+        required: false
+        default: "master"
+
+env:
+  TARGET: ${{ github.event.inputs.target }}
+  ARIA2_REF: ${{ github.event.inputs.aria2_ref || 'master' }}
+  # DoTheBetter build.sh 中的版本
+  USE_ZLIB_NG: "1"
+  USE_LIBRESSL: "0"
+
+jobs:
+  # ============================================================
+  # Linux musl 静态编译（使用 musl-cross-toolchain Docker）
+  # ============================================================
+  build-linux-musl:
+    name: Build Aria2 (${{ github.event.inputs.target }})
+    if: startsWith(github.event.inputs.target, 'linux-')
+    runs-on: ubuntu-latest
+    container:
+      image: abcfy2/musl-cross-toolchain:latest
+    steps:
+      - name: Checkout workflow repo
+        uses: actions/checkout@v4
+
+      - name: Show build parameters
+        run: |
+          echo "================ 构建参数 ================"
+          echo "TARGET = $TARGET"
+          echo "ARIA2_REF = $ARIA2_REF"
+          echo "=========================================="
+
+      - name: Clone Aria2 source
+        run: |
+          git clone --depth 1 --branch "$ARIA2_REF" \
+            https://github.com/aria2/aria2.git aria2-src || \
+            git clone https://github.com/aria2/aria2.git aria2-src && \
+            (cd aria2-src && git checkout "$ARIA2_REF")
+          cd aria2-src
+          echo "ARIA2_COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      - name: Apply DoTheBetter patches (6 patches)
+        working-directory: aria2-src
+        run: |
+          cd aria2-src
+          PATCH_DIR="${GITHUB_WORKSPACE}/.github/patches"
+
+          echo "=== 应用魔改补丁 ==="
+          for patch in \
+            aria2-0001-options-change-default-path-to-current-dir.patch \
+            aria2-0002-options-unlock-connection-per-server-limit.patch \
+            aria2-0003-download-retry-on-slow-speed-and-reset.patch \
+            aria2-0004-option_processing-make-use-of-deamon-on-mingw.patch \
+            aria2-0005-option-add-option-to-retry-on-http-4xx.patch \
+            aria2-0006-feature-config-add-os-info-for-newer-windows.patch; do
+            echo "Applying $patch..."
+            git am --3way "${PATCH_DIR}/${patch}" || {
+              echo "Patch $patch failed, trying --reject..."
+              git am --3way --reject "${PATCH_DIR}/${patch}" || true
+            }
+          done
+          echo "=== 补丁应用完成 ==="
+
+      - name: Build Linux (musl)
+        env:
+          CROSS_HOST: ${{ github.event.inputs.target == 'linux-aarch64-musl' && 'aarch64-unknown-linux-musleabi' || 'x86_64-unknown-linux-musl' }}
+          OPENSSL_COMPILER: ${{ github.event.inputs.target == 'linux-aarch64-musl' && 'linux-aarch64' || 'linux-x86_64' }}
+        run: |
+          cd aria2-src
+          COPY_PREFIX="${GITHUB_WORKSPACE}/prefix"
+          DOWNLOADS_DIR="${GITHUB_WORKSPACE}/downloads"
+          BUILD_INFO="${GITHUB_WORKSPACE}/build_info.md"
+          mkdir -p "$COPY_PREFIX" "$DOWNLOADS_DIR"
+
+          echo "# Build Info" > "$BUILD_INFO"
+          echo "TARGET: $TARGET" >> "$BUILD_INFO"
+          echo "CROSS_HOST: $CROSS_HOST" >> "$BUILD_INFO"
+
+          # 确定 OpenSSL 编译目标
+          if [ "$TARGET" = "linux-aarch64-musl" ]; then
+            OPENSSL_TARGET="linux-aarch64"
+          else
+            OPENSSL_TARGET="linux-x86_64"
+          fi
+
+          # ========== 1. 构建 zlib ==========
+          echo "--- Build zlib-ng ---"
+          ZLIB_URL="https://github.com/nothings/stb/releases/download/headerfix/zlib-ng-develop.tar.gz"
+          if [ ! -f "$DOWNLOADS_DIR/zlib-ng-develop.tar.gz" ]; then
+            curl -sSL -o "$DOWNLOADS_DIR/zlib-ng-develop.tar.gz" "$ZLIB_URL"
+          fi
+          mkdir -p /tmp/zlib-ng
+          tar -xzf "$DOWNLOADS_DIR/zlib-ng-develop.tar.gz" --strip-components=1 -C /tmp/zlib-ng
+          cd /tmp/zlib-ng
+          cmake -B build -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_C_COMPILER="${CROSS_HOST}-gcc" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DZLIB_COMPAT=ON \
+            -DWITH_GTEST=OFF \
+            -DCMAKE_INSTALL_PREFIX="$COPY_PREFIX"
+          cmake --build build -j"$(nproc)"
+          cmake --install build
+          echo "- zlib-ng: $(cat /tmp/zlib-ng/CMakeLists.txt | grep 'VERSION' | head -1)" >> "$BUILD_INFO"
+
+          # ========== 2. 构建 OpenSSL ==========
+          echo "--- Build OpenSSL ---"
+          if [ ! -f "$DOWNLOADS_DIR/openssl.tar.gz" ]; then
+            curl -sSL -o "$DOWNLOADS_DIR/openssl.tar.gz" \
+              https://github.com/openssl/openssl/releases/download/openssl-3.3.2/openssl-3.3.2.tar.gz
+          fi
+          mkdir -p /tmp/openssl
+          tar -xzf "$DOWNLOADS_DIR/openssl.tar.gz" --strip-components=1 -C /tmp/openssl
+          cd /tmp/openssl
+          ./Configure "${OPENSSL_TARGET}" --prefix="$COPY_PREFIX" --static -DL_ENDIAN
+          make -j"$(nproc)" CROSS_COMPILE="${CROSS_HOST}-"
+          make install_sw
+          echo "- OpenSSL: 3.3.2" >> "$BUILD_INFO"
+
+          # ========== 3. 构建 aria2 ==========
+          echo "--- Build aria2 ---"
+          cd aria2-src
+          export LDFLAGS="-L${COPY_PREFIX}/lib64 -L${COPY_PREFIX}/lib -s -static --static"
+          export PKG_CONFIG_PATH="${COPY_PREFIX}/lib64/pkgconfig:${COPY_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH}"
+          export CFLAGS="-I${COPY_PREFIX}/include"
+          export CXXFLAGS="-I${COPY_PREFIX}/include"
+
+          autoreconf -i
+          ./configure \
+            --host="$CROSS_HOST" \
+            --prefix="$COPY_PREFIX" \
+            --enable-static \
+            --disable-shared \
+            --without-libxml2 \
+            ARIA2_STATIC=yes
+          make -j"$(nproc)"
+
+          # ========== 4. 验证 & 打包 ==========
+          cd /tmp
+          STRIP_BIN="aria2-src/src/aria2c"
+          "${CROSS_HOST}-strip" "$STRIP_BIN" 2>/dev/null || true
+          mkdir -p "${GITHUB_WORKSPACE}/dist"
+          cp "$STRIP_BIN" "${GITHUB_WORKSPACE}/dist/aria2c"
+          echo "=== 构建产物 ==="
+          ls -lh "${GITHUB_WORKSPACE}/dist/"
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aria2-${{ env.TARGET }}-${{ env.ARIA2_COMMIT }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  # ============================================================
+  # Windows MinGW 交叉编译（Issue #1 修复版）
+  # ============================================================
+  build-windows:
+    name: Build Aria2 (windows-x86_64)
+    if: github.event.inputs.target == 'windows-x86_64'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout workflow repo
+        uses: actions/checkout@v4
+
+      - name: Show build parameters
+        run: |
+          echo "================ 构建参数 ================"
+          echo "TARGET = $TARGET"
+          echo "ARIA2_REF = $ARIA2_REF"
+          echo "=========================================="
+
+      - name: Install MinGW + build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential autoconf automake autopoint libtool pkg-config \
+            gettext git ca-certificates curl wget p7zip-full \
+            mingw-w64 clang bison flex \
+            gcc g++ gperf \
+            cmake ninja-build
+
+      - name: Set MinGW environment
+        run: |
+          echo "X86_64_MINGW_PREFIX=/usr/x86_64-w64-mingw32" >> "$GITHUB_ENV"
+          echo "CROSS_HOST=x86_64-w64-mingw32" >> "$GITHUB_ENV"
+
+      - name: Clone Aria2 source
+        run: |
+          git clone --depth 1 --branch "$ARIA2_REF" \
+            https://github.com/aria2/aria2.git aria2-src || \
+            git clone https://github.com/aria2/aria2.git aria2-src && \
+            (cd aria2-src && git checkout "$ARIA2_REF")
+          cd aria2-src
+          echo "ARIA2_COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          echo "Aria2 Commit: $(git rev-parse HEAD)"
+
+      - name: Apply DoTheBetter patches (6 patches)
+        working-directory: aria2-src
+        run: |
+          cd aria2-src
+          PATCH_DIR="${GITHUB_WORKSPACE}/.github/patches"
+          echo "=== 应用魔改补丁 ==="
+          for patch in \
+            aria2-0001-options-change-default-path-to-current-dir.patch \
+            aria2-0002-options-unlock-connection-per-server-limit.patch \
+            aria2-0003-download-retry-on-slow-speed-and-reset.patch \
+            aria2-0004-option_processing-make-use-of-deamon-on-mingw.patch \
+            aria2-0005-option-add-option-to-retry-on-http-4xx.patch \
+            aria2-0006-feature-config-add-os-info-for-newer-windows.patch; do
+            echo "Applying $patch..."
+            git am --3way "${PATCH_DIR}/${patch}" || {
+              echo "Patch $patch failed, trying --reject..."
+              git am --3way --reject "${PATCH_DIR}/${patch}" || true
+            }
+          done
+          echo "=== 补丁应用完成 ==="
+
+      - name: Build Windows (MinGW cross-compile)
+        env:
+          CROSS_PREFIX: /usr/x86_64-w64-mingw32
+          PREFIX_DIR: ${{ github.workspace }}/prefix
+          DOWNLOADS_DIR: ${{ github.workspace }}/downloads
+        run: |
+          mkdir -p "$PREFIX_DIR" "$DOWNLOADS_DIR"
+          BUILD_INFO="${GITHUB_WORKSPACE}/build_info.md"
+          echo "# Build Info (Windows)" > "$BUILD_INFO"
+          echo "TARGET: windows-x86_64" >> "$BUILD_INFO"
+
+          # ========== 1. 构建 OpenSSL (MinGW) ==========
+          echo "--- Build OpenSSL for Windows ---"
+          if [ ! -f "$DOWNLOADS_DIR/openssl.tar.gz" ]; then
+            curl -sSL -o "$DOWNLOADS_DIR/openssl.tar.gz" \
+              https://github.com/openssl/openssl/releases/download/openssl-3.3.2/openssl-3.3.2.tar.gz
+          fi
+          mkdir -p /tmp/openssl-win
+          tar -xzf "$DOWNLOADS_DIR/openssl.tar.gz" --strip-components=1 -C /tmp/openssl-win
+          cd /tmp/openssl-win
+          ./Configure --cross-compile-prefix=x86_64-w64-mingw32- \
+            --prefix="$PREFIX_DIR" mingw64 static
+          make -j"$(nproc)"
+          make install_sw
+          echo "- OpenSSL: 3.3.2" >> "$BUILD_INFO"
+
+          # ========== 2. 构建 zlib (MinGW) ==========
+          echo "--- Build zlib for Windows ---"
+          if [ ! -f "$DOWNLOADS_DIR/zlib.tar.gz" ]; then
+            curl -sSL -o "$DOWNLOADS_DIR/zlib.tar.gz" \
+              https://zlib.net/zlib-1.3.1.tar.gz
+          fi
+          mkdir -p /tmp/zlib-win
+          tar -xzf "$DOWNLOADS_DIR/zlib.tar.gz" --strip-components=1 -C /tmp/zlib-win
+          cd /tmp/zlib-win
+          CC=x86_64-w64-mingw32-gcc \
+          AR=x86_64-w64-mingw32-ar \
+          RC=x86_64-w64-mingw32-windres \
+            ./configure --prefix="$PREFIX_DIR" --static
+          make -j"$(nproc)"
+          make install
+          echo "- zlib: 1.3.1" >> "$BUILD_INFO"
+
+          # ========== 3. 构建 libxml2 (MinGW) ==========
+          echo "--- Build libxml2 for Windows (Issue #1 fix) ---"
+          # Issue #1 修复: 使用 GitLab API 获取 commit SHA，避免动态跳转 URL
+          LIBXML2_API=$(curl -sSL "https://gitlab.gnome.org/api/v4/projects/16299/repository/commits/master")
+          LIBXML2_SHA=$(echo "$LIBXML2_API" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          LIBXML2_TAR="https://gitlab.gnome.org/GNOME/libxml2/-/archive/master/libxml2-master-${LIBXML2_SHA:0:8}.tar.gz"
+          if [ ! -f "$DOWNLOADS_DIR/libxml2-master.tar.gz" ]; then
+            wget -c -O "$DOWNLOADS_DIR/libxml2-master.tar.gz" "$LIBXML2_TAR" || {
+              echo "Download failed, trying alternative..."
+              curl -sSL -o "$DOWNLOADS_DIR/libxml2-master.tar.gz" \
+                "https://gitlab.com/api/v4/projects/16299/repository/archive?sha=master"
+            }
+          fi
+          mkdir -p /tmp/libxml2-win
+          tar -xzf "$DOWNLOADS_DIR/libxml2-master.tar.gz" --strip-components=1 -C /tmp/libxml2-win
+          cd /tmp/libxml2-win
+          if [ ! -f "./configure" ]; then
+            autoreconf -i
+          fi
+          CC=x86_64-w64-mingw32-gcc \
+          AR=x86_64-w64-mingw32-ar \
+          ./configure \
+            --host=x86_64-w64-mingw32 \
+            --prefix="$PREFIX_DIR" \
+            --enable-silent-rules \
+            --without-python \
+            --without-icu \
+            --enable-static \
+            --disable-shared
+          make -j"$(nproc)"
+          make install
+          LIBXML2_VER=$(grep "Version:" "${PREFIX_DIR}/lib/pkgconfig/libxml-2.0.pc" | awk '{print $2}')
+          echo "- libxml2: ${LIBXML2_VER}" >> "$BUILD_INFO"
+
+          # ========== 4. 构建 aria2 (Windows) ==========
+          echo "--- Build aria2 for Windows ---"
+          cd aria2-src
+          export LDFLAGS="-L${PREFIX_DIR}/lib -s -static --static"
+          export CFLAGS="-I${PREFIX_DIR}/include"
+          export CXXFLAGS="-I${PREFIX_DIR}/include"
+          export CC=x86_64-w64-mingw32-gcc
+          export CXX=x86_64-w64-mingw32-g++
+          export AR=x86_64-w64-mingw32-ar
+
+          autoreconf -i
+          ./configure \
+            --host=x86_64-w64-mingw32 \
+            --prefix="$PREFIX_DIR" \
+            --enable-static \
+            --disable-shared \
+            --with-openssl \
+            --with-libxml2 \
+            --without-libcares \
+            --without-libssh2 \
+            ARIA2_STATIC=yes
+          make -j"$(nproc)"
+
+          # ========== 5. 打包 ==========
+          echo "--- Package ---"
+          mkdir -p "${GITHUB_WORKSPACE}/dist"
+          x86_64-w64-mingw32-strip src/aria2c.exe 2>/dev/null || true
+          cp src/aria2c.exe "${GITHUB_WORKSPACE}/dist/aria2c.exe"
+          echo "=== 构建产物 ==="
+          ls -lh "${GITHUB_WORKSPACE}/dist/"
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aria2-${{ env.TARGET }}-${{ env.ARIA2_COMMIT }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30

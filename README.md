@@ -1,74 +1,123 @@
 # Aria2 Build (Custom)
 
-A customizable Aria2 compilation workflow — build static/dynamic binaries with your own compile-time limits, no extra features.
+两个 Aria2 编译 workflow，基于 [DoTheBetter/aria2_build](https://github.com/DoTheBetter/aria2_build) 的完整魔改方案。
 
-## Features
+## 两个 Workflow 对比
 
-- **Customizable compile-time defaults** — `max-connection-per-server`, `min-split-size`, `max-concurrent-downloads`, `split`
-- **Multiple platforms** — `linux-x86_64`, `linux-aarch64`, `windows-x86_64`
-- **Static or dynamic linking** — OpenSSL-based build
-- **Manual trigger** — full control over every build parameter via `workflow_dispatch`
-- **Scheduled builds** — auto-rebuild every Monday at UTC 03:00 with latest `master` source
+| | `build.yml` | `worker.yml` |
+|--|--|--|
+| 架构 | Ubuntu 原生编译 | musl (Linux) / MinGW 交叉编译 (Windows) |
+| 静态链接 | 可选 | 默认 |
+| 补丁方式 | `git am` | `git am` |
+| 目标平台 | linux-x86_64, linux-aarch64, windows-x86_64 | linux-x86_64-musl, linux-aarch64-musl, windows-x86_64 |
+| Windows 特性 | 基础功能（无 sqlite3/ssh2 等） | 完整功能（含 libxml2） |
 
-## Compile-Time Defaults vs Runtime Defaults
+## 魔改内容（DoTheBetter 6 Patch）
 
-Aria2 has two layers of defaults:
+| Patch | 内容 |
+|-------|------|
+| `0001` | 默认路径改为当前目录（`~/.netrc` → `./.netrc` 等） |
+| `0002` | **`max-connection-per-server` 上限 16→无限制（-1），默认值 1→16** |
+| `0003` | 下载速度过慢或连接关闭时自动重试 |
+| `0004` | MinGW 环境下支持 `--daemon` |
+| `0005` | 新增 `--retry-on-400/403/406/unknown` 选项 |
+| `0006` | Windows 新版本号识别（Win8+ / Server 2012+） |
 
-| Option | Runtime Default | This Workflow's Compile-Time Default |
-|--------|----------------|--------------------------------------|
-| `--max-connection-per-server` / `-x` | `16` | `16` (patched to allow up to 32) |
-| `--min-split-size` / `-k` | `20M` | `1M` |
-| `--max-concurrent-downloads` / `-j` | `5` | `5` |
-| `--split` / `-s` | `5` | `16` |
+### 编译后默认值变化
 
-The runtime defaults (CLI flags) are always changeable. The compile-time defaults baked into the binary are what this workflow patches.
+| 选项 | 原版默认值 | 魔改后 |
+|------|-----------|--------|
+| `--max-connection-per-server` | `1`（上限 16） | `16`（**上限无限制**） |
+| `--max-concurrent-downloads` | `5` | `16` |
+| `--min-split-size` | `20M`（最小 1M） | `1M`（最小 1K） |
+| `--split` | `5` | `128` |
+| `--continue` | `false` | `true` |
+| `--connect-timeout` | `60s` | `30s` |
+| `--retry-wait` | `0s` | `1s` |
+| `--piece-length` | 最小 1M | 最小 1K |
 
-## Usage
+## 使用方法
 
-### Manual Build
+### workflow_dispatch（手动触发）
 
-1. Go to **[Actions](https://github.com/sixiang-world/aria2-build/actions)**
-2. Select **Build Aria2 (Custom)** → **Run workflow**
-3. Fill in parameters and click **Run workflow**
+**build.yml（灵活自定义）**
 
-### Parameters
+1. 进入 [Actions](https://github.com/sixiang-world/aria2-build/actions) → **Build Aria2 (Custom)**
+2. 填写参数（`target`、`aria2_ref` 等）
+3. 点击 **Run workflow**
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `aria2_ref` | Aria2 source branch / tag / commit | `master` |
-| `max_connection_per_server` | `MAX_CONNECTION_PER_SERVER` | `16` |
-| `min_split_size` | `MIN_SPLIT_SIZE` | `1M` |
-| `max_concurrent_downloads` | `MAX_CONCURRENT_DOWNLOADS` | `5` |
-| `max_split` | `MAX_SPLIT` | `16` |
-| `target` | Target platform | `linux-x86_64` |
-| `enable_static` | Static linking | `true` |
-| `extra_configure_flags` | Extra `./configure` flags | (empty) |
+**worker.yml（DoTheBetter 完整方案）**
 
-### Download Latest Artifact
+1. 进入 [Actions](https://github.com/sixiang-world/aria2-build/actions) → **Build Aria2 (Worker)**
+2. 选择目标平台（`linux-x86_64-musl` / `linux-aarch64-musl` / `windows-x86_64`）
+3. 点击 **Run workflow**
 
-After a successful run, download the built binary from the **Artifacts** section of the run.
+### schedule（定时自动构建）
 
-## Build Locally
+- `build.yml` 每周一 UTC 03:00 自动用最新 master 源码构建
+- `worker.yml` 不含定时任务（按需手动触发）
+
+### 参数说明
+
+#### build.yml
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `target` | `linux-x86_64` | 目标平台 |
+| `aria2_ref` | `master` | Aria2 源码分支/tag/commit |
+| `enable_static` | `true` | 静态编译 |
+| `extra_configure_flags` | (空) | 附加 configure 参数 |
+
+#### worker.yml
+
+| 参数 | 说明 |
+|------|------|
+| `target` | `linux-x86_64-musl` / `linux-aarch64-musl` / `windows-x86_64` |
+| `aria2_ref` | Aria2 源码分支/tag/commit |
+
+## 构建产物
+
+构建完成后在 **Artifacts** 下载：
+
+```
+aria2-{target}-{commit}.tar.gz
+```
+
+解压后得到单个可执行文件 `aria2c`（Linux）或 `aria2c.exe`（Windows）。
+
+## 本地构建
 
 ```bash
-# Install dependencies (Ubuntu/Debian)
-sudo apt-get install build-essential autoconf automake autopoint libtool pkg-config \
-  libcppunit-dev libssl-dev zlib1g-dev libc-ares-dev libsqlite3-dev libssh2-1-dev \
-  libgmp-dev libgcrypt20-dev gettext git ca-certificates
+git clone https://github.com/sixiang-world/aria2-build.git
+cd aria2-build
 
-# Clone aria2
-git clone https://github.com/aria2/aria2.git
-cd aria2
+# 应用补丁
+cd aria2-src
+for p in ../.github/patches/*.patch; do git am --3way "$p"; done
 
-# Patch defaults (example)
-sed -i 's/"max-connection-per-server"[^,]*,\s*"\([0-9]\+\)"/"max-connection-per-server"..., "16"/' src/OptionHandlerFactory.cc
+# Linux 原生编译
+./configure --with-openssl --with-libcares --with-libsqlite3 --with-libssh2 --enable-libaria2
+make -j$(nproc)
 
-# Build
-autoreconf -i
-./configure --without-gnutls --with-openssl --with-libcares --with-libsqlite3 --enable-libaria2
+# Windows MinGW 交叉编译
+./configure --host=x86_64-w64-mingw32 --prefix=/usr/x86_64-w64-mingw32 \
+  --enable-static --with-openssl --with-libxml2 ARIA2_STATIC=yes
 make -j$(nproc)
 ```
 
+## 致谢
+
+本项目的魔改方案基于以下项目和作者：
+
+- **[DoTheBetter/aria2_build](https://github.com/DoTheBetter/aria2_build)** — 核心魔改补丁（6 个 patch）
+  - `myfreeer` — 所有 patch 的原始作者
+  - Issue #1 libxml2 修复由 `lemonsn` 贡献
+- **[P3TERX/Aria2-Pro-Core](https://github.com/P3TERX/Aria2-Pro-Core)**
+- **[myfreeer/aria2-build-msys2](https://github.com/myfreeer/aria2-build-msys2)**
+- **[abcfy2/aria2-static-build](https://github.com/abcfy2/aria2-static-build)**
+- **[q3aql/aria2-static-builds](https://git.q3aql.dev/q3aql/aria2-static-builds)**
+- **[aria2/aria2](https://github.com/aria2/aria2)** — Aria2 主项目
+
 ## License
 
-Aria2 is licensed under [GPLv2](https://github.com/aria2/aria2/blob/master/COPYING). This repository's workflow code is MIT.
+Aria2 遵循 [GPLv2](https://github.com/aria2/aria2/blob/master/COPYING)。本仓库 workflow 代码遵循 MIT。

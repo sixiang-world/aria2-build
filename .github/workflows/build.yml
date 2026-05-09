@@ -103,42 +103,26 @@ jobs:
           echo "Aria2 Commit: $(git rev-parse HEAD)"
           echo "ARIA2_COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
 
-      - name: Apply compile-time patches
+      - name: Apply DoTheBetter patches (via git am)
         working-directory: aria2-src
         run: |
+          cd aria2-src
+          PATCH_DIR="${GITHUB_WORKSPACE}/.github/patches"
           echo "=== 应用魔改补丁 ==="
-
-          OPT_FILE=src/OptionHandlerFactory.cc
-
-          # 用 perl -0 处理多行匹配（源码中 NumberOptionHandler 跨多行）
-          # max-connection-per-server: 解锁上限 16→-1，同时改默认值
-          perl -0 -i -pe "
-            s/(\"max-connection-per-server\"[^\n]*\n[^\n]*\n)\"1\",\s*1,\s*16\b/\${1}\"${MAX_CONNECTION_PER_SERVER}\", 1, -1/g
-          " "$OPT_FILE" 2>/dev/null || true
-
-          # max-concurrent-downloads: 改默认值
-          perl -0 -i -pe "
-            s/(\"max-concurrent-downloads\"[^\n]*\n[^\n]*\n)\"5\",\s*1,\s*-1/\${1}\"${MAX_CONCURRENT_DOWNLOADS}\", 1, -1/g
-          " "$OPT_FILE" 2>/dev/null || true
-
-          # min-split-size: 改默认值 20M→1M，最小值 1M→1K
-          perl -0 -i -pe "
-            s/(\"min-split-size\"[^\n]*\n[^\n]*\n)\"20M\",\s*1_m,(\s*1_g)/\${1}\"${MIN_SPLIT_SIZE}\", 1_k,\2/g
-          " "$OPT_FILE" 2>/dev/null || true
-
-          # split: 改默认值 5→128
-          perl -0 -i -pe "
-            s/(\"split\"[^\n]*\n[^\n]*\n)\"5\",\s*1,\s*-1/\${1}\"${MAX_SPLIT}\", 1, -1/g
-          " "$OPT_FILE" 2>/dev/null || true
-
-          # continue: false→true
-          perl -0 -i -pe "
-            s/(PREF_CONTINUE[^\n]*\n[^\n]*\n)A2_V_FALSE/\${1}A2_V_TRUE/g
-          " "$OPT_FILE" 2>/dev/null || true
-
-          echo "----- 验证修改 -----"
-          grep -n "max-connection-per-server\|max-concurrent-downloads\|min-split-size\|\"split\"\|PREF_CONTINUE" \
-            "$OPT_FILE" | grep -E '"16"|"128"|"1M"|A2_V_TRUE|1, -1|1_m, 1_k' | head -20 || true
+          for patch in \
+            aria2-0001-options-change-default-path-to-current-dir.patch \
+            aria2-0002-options-unlock-connection-per-server-limit.patch \
+            aria2-0003-download-retry-on-slow-speed-and-reset.patch \
+            aria2-0004-option_processing-make-use-of-deamon-on-mingw.patch \
+            aria2-0005-option-add-option-to-retry-on-http-4xx.patch \
+            aria2-0006-feature-config-add-os-info-for-newer-windows.patch; do
+            echo "Applying $patch..."
+            git am --3way "${PATCH_DIR}/${patch}" || {
+              echo "Patch $patch failed, trying --reject..."
+              git am --3way --reject "${PATCH_DIR}/${patch}" || true
+            }
+          done
+          echo "=== 补丁应用完成 ==="
 
       - name: Bootstrap (autoreconf)
         working-directory: aria2-src
