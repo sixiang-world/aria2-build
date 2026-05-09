@@ -49,6 +49,7 @@ jobs:
           echo "=========================================="
 
       - name: Clone Aria2 source
+        working-directory: ${{ github.workspace }}
         run: |
           git clone --depth 1 --branch "$ARIA2_REF" \
             https://github.com/aria2/aria2.git aria2-src || \
@@ -58,9 +59,8 @@ jobs:
           echo "ARIA2_COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
 
       - name: Apply DoTheBetter patches (6 patches)
-        working-directory: aria2-src
+        working-directory: ${{ github.workspace }}/aria2-src
         run: |
-          cd aria2-src
           PATCH_DIR="${GITHUB_WORKSPACE}/.github/patches"
 
           echo "=== 应用魔改补丁 ==="
@@ -203,6 +203,7 @@ jobs:
           echo "CROSS_HOST=x86_64-w64-mingw32" >> "$GITHUB_ENV"
 
       - name: Clone Aria2 source
+        working-directory: ${{ github.workspace }}
         run: |
           git clone --depth 1 --branch "$ARIA2_REF" \
             https://github.com/aria2/aria2.git aria2-src || \
@@ -213,9 +214,8 @@ jobs:
           echo "Aria2 Commit: $(git rev-parse HEAD)"
 
       - name: Apply DoTheBetter patches (6 patches)
-        working-directory: aria2-src
+        working-directory: ${{ github.workspace }}/aria2-src
         run: |
-          cd aria2-src
           PATCH_DIR="${GITHUB_WORKSPACE}/.github/patches"
           echo "=== 应用魔改补丁 ==="
           for patch in \
