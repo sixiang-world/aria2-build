@@ -172,13 +172,14 @@ jobs:
               ;;
             windows-x86_64)
               # Windows: 禁用所有需要交叉编译依赖库的特性
-              # c-ares(Linux only)、sqlite3/libssh2/gmp/gcrypt(需MinGW交叉编译)
+              # c-ares(Linux only)、sqlite3/libssh2/gmp/gcrypt/zlib(需MinGW交叉编译)
               CONFIGURE_FLAGS="$CONFIGURE_FLAGS \
                 --without-libcares \
                 --without-libssh2 \
                 --without-libgmp \
                 --without-libgcrypt \
                 --without-sqlite3 \
+                --without-libz \
                 --host=x86_64-w64-mingw32"
               ;;
           esac
