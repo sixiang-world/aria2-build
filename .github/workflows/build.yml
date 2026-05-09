@@ -1,0 +1,181 @@
+name: Build Aria2 (Custom)
+
+on:
+  workflow_dispatch:
+    inputs:
+      aria2_ref:
+        description: "Aria2 源码分支 / Tag / Commit（留空则使用 master 最新源码）"
+        required: false
+        default: "master"
+      max_connection_per_server:
+        description: "MAX_CONNECTION_PER_SERVER（单服务器最大连接数，默认 16）"
+        required: false
+        default: "16"
+      min_split_size:
+        description: "MIN_SPLIT_SIZE（最小分片大小，默认 1M）"
+        required: false
+        default: "1M"
+      max_concurrent_downloads:
+        description: "MAX_CONCURRENT_DOWNLOADS（最大并发下载数，默认 5）"
+        required: false
+        default: "5"
+      max_split:
+        description: "MAX_SPLIT（单任务最大分片数，默认 16）"
+        required: false
+        default: "16"
+      target:
+        description: "目标平台"
+        required: false
+        default: "linux-x86_64"
+        type: choice
+        options:
+          - linux-x86_64
+          - linux-aarch64
+          - windows-x86_64
+      enable_static:
+        description: "是否静态编译（true/false）"
+        required: false
+        default: "true"
+      extra_configure_flags:
+        description: "附加 configure 参数（可留空）"
+        required: false
+        default: ""
+  schedule:
+    # 每周一 UTC 03:00 自动拉取最新源码构建一次
+    - cron: "0 3 * * 1"
+
+env:
+  ARIA2_REF: ${{ github.event.inputs.aria2_ref || 'master' }}
+  MAX_CONNECTION_PER_SERVER: ${{ github.event.inputs.max_connection_per_server || '16' }}
+  MIN_SPLIT_SIZE: ${{ github.event.inputs.min_split_size || '1M' }}
+  MAX_CONCURRENT_DOWNLOADS: ${{ github.event.inputs.max_concurrent_downloads || '5' }}
+  MAX_SPLIT: ${{ github.event.inputs.max_split || '16' }}
+  TARGET: ${{ github.event.inputs.target || 'linux-x86_64' }}
+  ENABLE_STATIC: ${{ github.event.inputs.enable_static || 'true' }}
+  EXTRA_CONFIGURE_FLAGS: ${{ github.event.inputs.extra_configure_flags || '' }}
+
+jobs:
+  build:
+    name: Build Aria2 (${{ github.event.inputs.target || 'linux-x86_64' }})
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout workflow repo
+        uses: actions/checkout@v4
+
+      - name: Show build parameters
+        run: |
+          echo "================ 构建参数 ================"
+          echo "ARIA2_REF = $ARIA2_REF"
+          echo "TARGET = $TARGET"
+          echo "ENABLE_STATIC = $ENABLE_STATIC"
+          echo "MAX_CONNECTION_PER_SERVER = $MAX_CONNECTION_PER_SERVER"
+          echo "MIN_SPLIT_SIZE = $MIN_SPLIT_SIZE"
+          echo "MAX_CONCURRENT_DOWNLOADS = $MAX_CONCURRENT_DOWNLOADS"
+          echo "MAX_SPLIT = $MAX_SPLIT"
+          echo "EXTRA_CONFIGURE_FLAGS = $EXTRA_CONFIGURE_FLAGS"
+          echo "=========================================="
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential autoconf automake autopoint libtool pkg-config \
+            libcppunit-dev libssl-dev libxml2-dev zlib1g-dev libc-ares-dev \
+            libsqlite3-dev libssh2-1-dev libgmp-dev libgcrypt20-dev \
+            gettext git ca-certificates curl
+
+          if [ "$TARGET" = "linux-aarch64" ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          fi
+
+          if [ "$TARGET" = "windows-x86_64" ]; then
+            sudo apt-get install -y mingw-w64
+          fi
+
+      - name: Clone latest Aria2 source
+        run: |
+          git clone --depth 1 --branch "$ARIA2_REF" \
+            https://github.com/aria2/aria2.git aria2-src || \
+            git clone https://github.com/aria2/aria2.git aria2-src && \
+            (cd aria2-src && git checkout "$ARIA2_REF")
+
+          cd aria2-src
+          echo "Aria2 Commit: $(git rev-parse HEAD)"
+          echo "ARIA2_COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      - name: Patch compile-time limits
+        working-directory: aria2-src
+        run: |
+          OPT_FILE=src/OptionHandlerFactory.cc
+
+          echo "修改 OptionHandlerFactory.cc 中的默认值..."
+
+          # 修改 max-connection-per-server 的上限（原 -1U 无限制，此处替换默认值）
+          sed -i -E \
+            "s/(\"max-connection-per-server\"[^,]*,\\s*)\"[0-9]+\"/\\1\"${MAX_CONNECTION_PER_SERVER}\"/g" \
+            "$OPT_FILE" || true
+
+          sed -i -E \
+            "s/(\"min-split-size\"[^,]*,\\s*)\"[0-9A-Za-z]+\"/\\1\"${MIN_SPLIT_SIZE}\"/g" \
+            "$OPT_FILE" || true
+
+          sed -i -E \
+            "s/(\"max-concurrent-downloads\"[^,]*,\\s*)\"[0-9]+\"/\\1\"${MAX_CONCURRENT_DOWNLOADS}\"/g" \
+            "$OPT_FILE" || true
+
+          sed -i -E \
+            "s/(\"split\"[^,]*,\\s*)\"[0-9]+\"/\\1\"${MAX_SPLIT}\"/g" \
+            "$OPT_FILE" || true
+
+          echo "----- 修改后关键默认值 -----"
+          grep -E "max-connection-per-server|min-split-size|max-concurrent-downloads|\"split\"" "$OPT_FILE" || true
+
+      - name: Bootstrap (autoreconf)
+        working-directory: aria2-src
+        run: autoreconf -i
+
+      - name: Configure
+        working-directory: aria2-src
+        run: |
+          CONFIGURE_FLAGS="--without-gnutls --with-openssl \
+            --without-libxml2 --with-libexpat=no --with-libxml2=no \
+            --with-sqlite3 --with-libcares \
+            --enable-libaria2"
+
+          ARIA2_STATIC=${ENABLE_STATIC}
+
+          case "$TARGET" in
+            linux-aarch64)
+              CONFIGURE_FLAGS="$CONFIGURE_FLAGS --host=aarch64-linux-gnu"
+              ;;
+            windows-x86_64)
+              CONFIGURE_FLAGS="$CONFIGURE_FLAGS --host=x86_64-w64-mingw32"
+              ;;
+          esac
+
+          if [ "$ENABLE_STATIC" = "true" ]; then
+            CONFIGURE_FLAGS="$CONFIGURE_FLAGS LDFLAGS=-static"
+          fi
+
+          ./configure $CONFIGURE_FLAGS $EXTRA_CONFIGURE_FLAGS
+
+      - name: Build
+        working-directory: aria2-src
+        run: make -j"$(nproc)"
+
+      - name: Package artifacts
+        run: |
+          mkdir -p dist
+          BIN_NAME="aria2c"
+          [ "$TARGET" = "windows-x86_64" ] && BIN_NAME="aria2c.exe"
+          cp "aria2-src/src/${BIN_NAME}" "dist/${BIN_NAME}"
+          (cd dist && tar -czf "aria2-${TARGET}-${ARIA2_COMMIT}.tar.gz" "${BIN_NAME}")
+          ls -lh dist
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aria2-${{ env.TARGET }}-${{ env.ARIA2_COMMIT }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 30
