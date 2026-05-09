@@ -196,6 +196,8 @@ jobs:
             mingw-w64 clang bison flex \
             gcc g++ gperf \
             cmake ninja-build
+          # windres 需要在 PATH 中（OpenSSL Makefile 直接调用 windres）
+          sudo ln -sf /usr/bin/x86_64-w64-mingw32-windres /usr/local/bin/windres
 
       - name: Set MinGW environment
         run: |
