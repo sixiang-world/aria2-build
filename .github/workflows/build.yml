@@ -139,17 +139,19 @@ jobs:
         run: |
           CONFIGURE_FLAGS="--without-gnutls --with-openssl \
             --without-libxml2 --with-libexpat=no --with-libxml2=no \
-            --with-sqlite3 --with-libcares \
+            --with-sqlite3 \
             --enable-libaria2"
 
-          ARIA2_STATIC=${ENABLE_STATIC}
-
           case "$TARGET" in
+            linux-x86_64)
+              CONFIGURE_FLAGS="$CONFIGURE_FLAGS --with-libcares"
+              ;;
             linux-aarch64)
-              CONFIGURE_FLAGS="$CONFIGURE_FLAGS --host=aarch64-linux-gnu"
+              CONFIGURE_FLAGS="$CONFIGURE_FLAGS --with-libcares --host=aarch64-linux-gnu"
               ;;
             windows-x86_64)
-              CONFIGURE_FLAGS="$CONFIGURE_FLAGS --host=x86_64-w64-mingw32"
+              # Windows cross-compile: disable c-ares (Linux-only), disable shared lib
+              CONFIGURE_FLAGS="$CONFIGURE_FLAGS --without-libcares --disable-libaria2 --host=x86_64-w64-mingw32"
               ;;
           esac
 
